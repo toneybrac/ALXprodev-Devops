@@ -1,58 +1,40 @@
 #!/bin/bash
 
 # Script: data_extraction_automation-0x01
-# Description: Extracts Pokémon data from JSON file and formats it
-# Required tools: jq, awk, sed only
+# Description: Extracts Pokémon data from JSON file using only jq, awk, sed
 
 # Check if data.json exists
-if [ ! -f "data.json" ]; then
-    echo "Error: data.json not found. Run Task 0 first." >&2
-    exit 1
-fi
+[ ! -f "data.json" ] && echo "Error: data.json not found" >&2 && exit 1
 
-# Check if jq is installed
-if ! command -v jq &> /dev/null; then
-    echo "Error: jq is required but not installed." >&2
-    exit 1
-fi
+# Extract data using jq and format using awk and sed
+# Using exact format: "Pikachu is of type Electric, weighs 6kg, and is 0.4m tall."
 
-# Extract data using jq
-# Get name, height (in decimetres), weight (in hectograms), and type
-# Note: API returns height in decimeters, weight in hectograms
-# 1 decimeter = 0.1 meters, 1 hectogram = 0.1 kg
-
-# Extract raw values
-NAME=$(jq -r '.name' data.json 2>/dev/null)
-HEIGHT=$(jq -r '.height' data.json 2>/dev/null)
-WEIGHT=$(jq -r '.weight' data.json 2>/dev/null)
-TYPE=$(jq -r '.types[0].type.name' data.json 2>/dev/null)
-
-# Check if extraction was successful
-if [ -z "$NAME" ] || [ -z "$HEIGHT" ] || [ -z "$WEIGHT" ] || [ -z "$TYPE" ]; then
-    echo "Error: Failed to extract data from JSON." >&2
-    exit 1
-fi
-
-# Convert units:
-# Height: decimeters to meters (divide by 10)
-# Weight: hectograms to kg (divide by 10)
-HEIGHT_M=$(echo "scale=1; $HEIGHT / 10" | bc 2>/dev/null || echo "$HEIGHT")
-WEIGHT_KG=$(echo "scale=1; $WEIGHT / 10" | bc 2>/dev/null || echo "$WEIGHT")
-
-# Alternative: Use awk for calculation if bc is not available
-# But since we're only allowed to use jq, awk, sed, let's use awk:
-HEIGHT_M=$(echo "$HEIGHT" | awk '{printf "%.1f", $1/10}')
-WEIGHT_KG=$(echo "$WEIGHT" | awk '{printf "%.1f", $1/10}')
-
-# Capitalize first letter of type (Electric instead of electric)
-# Using sed for capitalization
-CAPITALIZED_TYPE=$(echo "$TYPE" | sed 's/^./\U&/')
-
-# Format the output using awk for precise formatting
-echo "$NAME is of type $CAPITALIZED_TYPE, weighs ${WEIGHT_KG}kg, and is ${HEIGHT_M}m tall." | \
-    awk '{
-        # Ensure no trailing .0 in the numbers
-        gsub(/\.0kg/, "kg", $0)
-        gsub(/\.0m/, "m", $0)
-        print $0
-    }'
+jq -r '
+  .name as $name |
+  .height as $height |
+  .weight as $weight |
+  .types[0].type.name as $type |
+  "\($name) \($height) \($weight) \($type)"
+' data.json 2>/dev/null | \
+awk '{
+    # Convert height from decimeters to meters
+    height_m = $2 / 10
+    
+    # Convert weight from hectograms to kilograms  
+    weight_kg = $3 / 10
+    
+    # Remove .0 if present
+    if (height_m == int(height_m)) height_m = int(height_m)
+    if (weight_kg == int(weight_kg)) weight_kg = int(weight_kg)
+    
+    # Capitalize first letter of name
+    name = toupper(substr($1,1,1)) substr($1,2)
+    
+    # Capitalize first letter of type using sed via system call
+    type_cmd = "echo \"" $4 "\" | sed \"s/^./\\U&/\""
+    type_cmd | getline type
+    close(type_cmd)
+    
+    # Format the output exactly as required
+    printf "%s is of type %s, weighs %skg, and is %sm tall.\n", name, type, weight_kg, height_m
+}' || echo "Error: Failed to extract data from data.json" >&2
