@@ -1,0 +1,98 @@
+#!/bin/bash
+
+# Script: apiAutomation-0x00
+# Description: Makes API request to Pokémon API for Pikachu data
+#              Saves response to data.json, logs errors to errors.txt
+# Author: ALX Student
+
+# Set the API URL for Pikachu
+API_URL="https://pokeapi.co/api/v2/pokemon/pikachu"
+
+# Create timestamp for logging
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+# Function to log errors
+log_error() {
+    echo "[$TIMESTAMP] ERROR: $1" >> errors.txt
+    echo "Error: $1" >&2
+}
+
+# Clear previous data.json and errors.txt if they exist
+> data.json
+> errors.txt 2>/dev/null || true
+
+# Make the API request using curl
+echo "Fetching Pikachu data from Pokémon API..."
+echo "API URL: $API_URL"
+
+# Use curl with appropriate options:
+# -s: silent mode (no progress meter)
+# -S: show error if it fails (combine with -s)
+# -L: follow redirects if any
+# -o: output to file
+# -w: write HTTP status code
+# --max-time: timeout after 30 seconds
+HTTP_CODE=$(curl -sSL -o data.json \
+    -w "%{http_code}" \
+    --max-time 30 \
+    "$API_URL")
+
+# Check if curl command was successful
+if [ $? -ne 0 ]; then
+    log_error "Failed to connect to API or network error"
+    exit 1
+fi
+
+# Check HTTP status code
+if [ "$HTTP_CODE" -eq 200 ]; then
+    echo "✅ Success! API request completed with HTTP 200"
+    echo "✅ Data saved to data.json"
+    
+    # Validate JSON format
+    if jq empty data.json 2>/dev/null; then
+        echo "✅ JSON validation passed"
+        
+        # Display success message with some stats
+        FILE_SIZE=$(wc -c < data.json | awk '{print $1}')
+        echo "✅ File size: $FILE_SIZE bytes"
+        
+        # Show first few lines as preview
+        echo -e "\nPreview of data.json (first 5 lines):"
+        head -n 5 data.json
+        
+    else
+        log_error "Invalid JSON received from API"
+        echo "Error: Invalid JSON format received" > data.json
+        exit 1
+    fi
+    
+elif [ "$HTTP_CODE" -eq 404 ]; then
+    log_error "Pokémon not found (HTTP 404)"
+    echo "Error: Pokémon 'pikachu' not found" > data.json
+    exit 1
+    
+elif [ "$HTTP_CODE" -eq 429 ]; then
+    log_error "Rate limit exceeded (HTTP 429)"
+    echo "Error: API rate limit exceeded. Please try again later." > data.json
+    exit 1
+    
+elif [ "$HTTP_CODE" -eq 500 ] || [ "$HTTP_CODE" -eq 502 ] || [ "$HTTP_CODE" -eq 503 ]; then
+    log_error "Server error (HTTP $HTTP_CODE)"
+    echo "Error: API server error. Please try again later." > data.json
+    exit 1
+    
+else
+    log_error "Unexpected HTTP status code: $HTTP_CODE"
+    echo "Error: Unexpected API response (HTTP $HTTP_CODE)" > data.json
+    exit 1
+fi
+
+# Final success check
+if [ -s data.json ] && grep -q '"name"' data.json 2>/dev/null; then
+    echo -e "\n🎉 Script completed successfully!"
+    echo "   - data.json contains Pikachu data"
+    echo "   - Check errors.txt if there were any issues"
+else
+    log_error "Data file is empty or missing expected content"
+    exit 1
+fi
