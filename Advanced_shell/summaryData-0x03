@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# Script: summaryData-0x03
+# Description: Summarizes Pokémon data from JSON files and generates CSV report
+# Calculates average height and weight using awk
+
+# Configuration
+DATA_DIR="pokemon_data"
+OUTPUT_FILE="pokemon_report.csv"
+
+# Function to validate directory and files
+validate_input() {
+    if [ ! -d "$DATA_DIR" ]; then
+        echo "Error: Directory '$DATA_DIR' not found." >&2
+        echo "Please run Task 2 first to generate Pokémon data." >&2
+        exit 1
+    fi
+    
+    # Count JSON files
+    local file_count=$(find "$DATA_DIR" -name "*.json" -type f | wc -l)
+    
+    if [ "$file_count" -eq 0 ]; then
+        echo "Error: No JSON files found in '$DATA_DIR'." >&2
+        exit 1
+    fi
+    
+    echo "Found $file_count Pokémon data files in $DATA_DIR/"
+    return 0
+}
+
+# Function to extract and process data
+generate_report() {
+    # Create temporary file for raw data
+    local temp_file=$(mktemp)
+    
+    echo "Processing Pokémon data..."
+    
+    # Process each JSON file
+    for json_file in "$DATA_DIR"/*.json; do
+        if [ ! -f "$json_file" ]; then
+            continue
+        fi
+        
+        # Extract name, height, weight using jq
+        # Note: Height in decimeters, weight in hectograms
+        local name=$(jq -r '.name // empty' "$json_file" 2>/dev/null)
+        local height_dm=$(jq -r '.height // 0' "$json_file" 2>/dev/null)
+        local weight_hg=$(jq -r '.weight // 0' "$json_file" 2>/dev/null)
+        
+        # Skip if name is empty (invalid JSON)
+        if [ -z "$name" ] || [ "$name" == "null" ]; then
+            echo "  Warning: Skipping invalid file: $(basename "$json_file")" >&2
+            continue
+        fi
+        
+        # Convert units: decimeters to meters, hectograms to kilograms
+        # Using awk for precision calculation
+        local height_m=$(echo "$height_dm" | awk '{printf "%.2f", $1/10}')
+        local weight_kg=$(echo "$weight_hg" | awk '{printf "%.2f", $1/10}')
+        
+        # Capitalize first letter of name
+        local capitalized_name=$(echo "$name" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
+        
+        # Write to temp file in CSV format
+        echo "$capitalized_name,$height_m,$weight_kg" >> "$temp_file"
+        
+        echo "  Processed: $capitalized_name"
+    done
+    
+    # Sort data alphabetically by name
+    local sorted_temp=$(mktemp)
+    sort -t',' -k1 "$temp_file" > "$sorted_temp"
+    
+    # Create CSV header
+    echo "Name,Height (m),Weight (kg)" > "$OUTPUT_FILE"
+    
+    # Add sorted data to CSV
+    cat "$sorted_temp" >> "$OUTPUT_FILE"
+    
+    # Calculate averages using awk
+    echo ""
+    echo "Calculating averages..."
+    
+    # Use awk to calculate averages from the temp file (skip header)
+    awk -F',' '
+    NR > 1 {
+        height_sum += $2
+        weight_sum += $3
+        count++
+    }
+    END {
+        if (count > 0) {
+            avg_height = height_sum / count
+            avg_weight = weight_sum / count
+            
+            # Format to 2 decimal places
+            printf "Average Height: %.2f m\n", avg_height
+            printf "Average Weight: %.2f kg\n", avg_weight
+        } else {
+            print "No valid data to calculate averages."
+        }
+    }
+    ' "$OUTPUT_FILE"
+    
+    # Clean up temp files
+    rm -f "$temp_file" "$sorted_temp"
+    
+    return 0
+}
+
+# Main execution
+echo "=== Pokémon Data Summary Report ==="
+echo ""
+
+# Validate input
+validate_input
+
+# Generate report
+generate_report
+
+# Final output
+echo ""
+echo "CSV Report generated at: $OUTPUT_FILE"
+echo ""
+echo "Report preview:"
+echo "==============="
+if [ -f "$OUTPUT_FILE" ]; then
+    # Display first 6 lines (header + up to 5 data rows)
+    head -n 6 "$OUTPUT_FILE" | while IFS= read -r line; do
+        echo "$line"
+    done
+    
+    # Show total count
+    total_rows=$(wc -l < "$OUTPUT_FILE")
+    data_rows=$((total_rows - 1))
+    echo "..."
+    echo "Total Pokémon in report: $data_rows"
+else
+    echo "Error: Failed to create report file." >&2
+    exit 1
+fi
+
+echo ""
+echo "Done!"

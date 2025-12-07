@@ -1,0 +1,309 @@
+#!/bin/bash
+
+# Script: batchProcessing-0x04
+# Description: Parallel Pokémon data fetching using background processes
+# Fetches data for multiple Pokémon simultaneously
+
+# Configuration
+POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+DATA_DIR="pokemon_data"
+BASE_URL="https://pokeapi.co/api/v2/pokemon"
+MAX_PARALLEL=3  # Maximum number of parallel processes
+LOG_FILE="parallel_fetch.log"
+ERROR_FILE="parallel_errors.log"
+
+# Colors for output (optional)
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Create directories and clean up old files
+mkdir -p "$DATA_DIR"
+> "$LOG_FILE"
+> "$ERROR_FILE"
+
+# Function to log messages
+log() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $message" >> "$LOG_FILE"
+    echo -e "${BLUE}[INFO]${NC} $message"
+}
+
+# Function to log errors
+log_error() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] ERROR: $message" >> "$ERROR_FILE"
+    echo -e "${RED}[ERROR]${NC} $message"
+}
+
+# Function to fetch a single Pokémon
+fetch_pokemon() {
+    local pokemon="$1"
+    local pid="$2"
+    local output_file="$DATA_DIR/${pokemon}.json"
+    
+    log "Process $pid: Starting fetch for $pokemon"
+    
+    # Make API request
+    local response=$(curl -sSL \
+        --max-time 30 \
+        --retry 2 \
+        --retry-delay 1 \
+        "${BASE_URL}/${pokemon}" 2>&1)
+    
+    local curl_exit_code=$?
+    
+    if [ $curl_exit_code -eq 0 ]; then
+        # Check if response is valid JSON
+        if echo "$response" | jq -e '.name' >/dev/null 2>&1; then
+            # Save to file
+            echo "$response" > "$output_file"
+            
+            # Verify file was created
+            if [ -s "$output_file" ]; then
+                log "Process $pid: ✅ Successfully fetched $pokemon"
+                echo "SUCCESS:$pokemon" >> "$LOG_FILE"
+                return 0
+            else
+                log_error "Process $pid: Failed to save $pokemon data"
+                echo "ERROR:$pokemon:FILE_SAVE_FAILED" >> "$ERROR_FILE"
+                return 1
+            fi
+        else
+            log_error "Process $pid: Invalid JSON for $pokemon"
+            echo "ERROR:$pokemon:INVALID_JSON" >> "$ERROR_FILE"
+            return 1
+        fi
+    else
+        log_error "Process $pid: Network error for $pokemon (Curl exit: $curl_exit_code)"
+        echo "ERROR:$pokemon:NETWORK_ERROR:$curl_exit_code" >> "$ERROR_FILE"
+        return 1
+    fi
+}
+
+# Function to monitor background processes
+monitor_processes() {
+    local active_jobs=0
+    local completed_jobs=0
+    local total_jobs=${#POKEMON_LIST[@]}
+    local job_pids=()
+    local job_names=()
+    
+    log "Starting parallel fetch with max $MAX_PARALLEL concurrent processes"
+    log "Total Pokémon to fetch: $total_jobs"
+    
+    # Initialize job tracking
+    for ((i=0; i<total_jobs; i++)); do
+        job_names[$i]="${POKEMON_LIST[$i]}"
+        job_pids[$i]=""
+    done
+    
+    # Process queue
+    local current_index=0
+    while [ $completed_jobs -lt $total_jobs ]; do
+        # Start new jobs if we have capacity
+        while [ $active_jobs -lt $MAX_PARALLEL ] && [ $current_index -lt $total_jobs ]; do
+            local pokemon="${job_names[$current_index]}"
+            local job_id=$((current_index + 1))
+            
+            # Start job in background
+            fetch_pokemon "$pokemon" "$job_id" &
+            local pid=$!
+            job_pids[$current_index]=$pid
+            
+            log "Started job $job_id (PID: $pid) for $pokemon"
+            
+            active_jobs=$((active_jobs + 1))
+            current_index=$((current_index + 1))
+            
+            # Small delay to avoid overwhelming the API
+            sleep 0.5
+        done
+        
+        # Check for completed jobs
+        for ((i=0; i<current_index; i++)); do
+            if [ -n "${job_pids[$i]}" ]; then
+                # Check if process is still running
+                if ! kill -0 "${job_pids[$i]}" 2>/dev/null; then
+                    # Process finished
+                    wait "${job_pids[$i]}" 2>/dev/null
+                    local exit_code=$?
+                    
+                    if [ $exit_code -eq 0 ]; then
+                        log "Job for ${job_names[$i]} completed successfully"
+                    else
+                        log_error "Job for ${job_names[$i]} failed with code $exit_code"
+                    fi
+                    
+                    job_pids[$i]=""
+                    active_jobs=$((active_jobs - 1))
+                    completed_jobs=$((completed_jobs + 1))
+                fi
+            fi
+        done
+        
+        # Show progress
+        if [ $completed_jobs -lt $total_jobs ]; then
+            echo -ne "\r${YELLOW}[PROGRESS]${NC} Completed: $completed_jobs/$total_jobs | Active: $active_jobs | Pending: $((total_jobs - current_index))"
+            sleep 1
+        fi
+    done
+    
+    echo -e "\r${GREEN}[PROGRESS]${NC} Completed: $completed_jobs/$total_jobs | Active: 0 | Pending: 0"
+}
+
+# Function to wait for all background processes (alternative approach)
+wait_for_all_processes() {
+    log "Waiting for all background processes to complete..."
+    
+    # Wait for all background jobs
+    local wait_count=0
+    for job in $(jobs -p); do
+        wait "$job"
+        local exit_code=$?
+        wait_count=$((wait_count + 1))
+        
+        if [ $exit_code -eq 0 ]; then
+            log "Background job $wait_count completed successfully"
+        else
+            log_error "Background job $wait_count failed with code $exit_code"
+        fi
+    done
+    
+    log "All $wait_count background processes completed"
+}
+
+# Function to fetch all Pokémon in parallel (simpler approach)
+fetch_all_parallel_simple() {
+    local pids=()
+    local results=()
+    local job_num=1
+    
+    log "=== Starting parallel fetch (simple approach) ==="
+    
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        log "Launching job $job_num for $pokemon"
+        
+        # Start each fetch in background
+        (
+            local output_file="$DATA_DIR/${pokemon}.json"
+            local temp_log=$(mktemp)
+            
+            if curl -sSL -o "$output_file" --max-time 30 "${BASE_URL}/${pokemon}" 2>"$temp_log"; then
+                if jq -e '.name' "$output_file" >/dev/null 2>&1; then
+                    echo "SUCCESS:$pokemon" >> "$LOG_FILE"
+                    exit 0
+                else
+                    echo "ERROR:$pokemon:INVALID_JSON" >> "$ERROR_FILE"
+                    rm -f "$output_file"
+                    exit 1
+                fi
+            else
+                echo "ERROR:$pokemon:FETCH_FAILED" >> "$ERROR_FILE"
+                cat "$temp_log" >> "$ERROR_FILE"
+                rm -f "$output_file"
+                exit 1
+            fi
+            
+            rm -f "$temp_log"
+        ) &
+        
+        pids[$job_num]=$!
+        job_num=$((job_num + 1))
+        
+        # Limit concurrent processes
+        if [ $((job_num % MAX_PARALLEL)) -eq 0 ]; then
+            log "Waiting for batch of $MAX_PARALLEL processes..."
+            wait "${pids[@]}" 2>/dev/null
+        fi
+        
+        sleep 0.3  # Small delay to avoid rate limiting
+    done
+    
+    # Wait for remaining processes
+    log "Waiting for remaining processes..."
+    wait
+    
+    log "All parallel processes completed"
+}
+
+# Main execution
+main() {
+    echo "========================================"
+    echo "   PARALLEL POKÉMON DATA FETCHER"
+    echo "========================================"
+    echo ""
+    
+    # Check requirements
+    if ! command -v jq >/dev/null 2>&1; then
+        log_error "jq is required but not installed. Please install jq first."
+        exit 1
+    fi
+    
+    if ! command -v curl >/dev/null 2>&1; then
+        log_error "curl is required but not installed. Please install curl first."
+        exit 1
+    fi
+    
+    # Choose method (uncomment preferred method)
+    log "Method 1: Controlled parallel execution with monitoring"
+    monitor_processes
+    
+    # Alternative method (uncomment to use):
+    # log "Method 2: Simple parallel execution"
+    # fetch_all_parallel_simple
+    
+    # Generate summary
+    generate_summary
+}
+
+# Function to generate summary report
+generate_summary() {
+    echo ""
+    echo "========================================"
+    echo "          FETCHING SUMMARY"
+    echo "========================================"
+    
+    local success_count=0
+    local error_count=0
+    
+    # Count successful fetches
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        if [ -f "$DATA_DIR/${pokemon}.json" ]; then
+            if jq -e '.name' "$DATA_DIR/${pokemon}.json" >/dev/null 2>&1; then
+                success_count=$((success_count + 1))
+            else
+                error_count=$((error_count + 1))
+            fi
+        else
+            error_count=$((error_count + 1))
+        fi
+    done
+    
+    echo -e "${GREEN}✅ Successful fetches: $success_count/${#POKEMON_LIST[@]}${NC}"
+    
+    if [ $error_count -gt 0 ]; then
+        echo -e "${RED}❌ Failed fetches: $error_count/${#POKEMON_LIST[@]}${NC}"
+        echo ""
+        echo "Error details in: $ERROR_FILE"
+        echo "Last 5 errors:"
+        tail -5 "$ERROR_FILE" 2>/dev/null || echo "No errors recorded"
+    else
+        echo -e "${GREEN}🎉 All Pokémon fetched successfully!${NC}"
+    fi
+    
+    echo ""
+    echo "Created files in: $DATA_DIR/"
+    ls -la "$DATA_DIR/" 2>/dev/null || echo "No files created"
+    
+    echo ""
+    echo "Log file: $LOG_FILE"
+    echo "Error file: $ERROR_FILE"
+}
+
+# Run main function
+main "$@"

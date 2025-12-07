@@ -1,0 +1,58 @@
+#!/bin/bash
+
+# Script: data_extraction_automation-0x01
+# Description: Extracts Pokémon data from JSON file and formats it
+# Required tools: jq, awk, sed only
+
+# Check if data.json exists
+if [ ! -f "data.json" ]; then
+    echo "Error: data.json not found. Run Task 0 first." >&2
+    exit 1
+fi
+
+# Check if jq is installed
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq is required but not installed." >&2
+    exit 1
+fi
+
+# Extract data using jq
+# Get name, height (in decimetres), weight (in hectograms), and type
+# Note: API returns height in decimeters, weight in hectograms
+# 1 decimeter = 0.1 meters, 1 hectogram = 0.1 kg
+
+# Extract raw values
+NAME=$(jq -r '.name' data.json 2>/dev/null)
+HEIGHT=$(jq -r '.height' data.json 2>/dev/null)
+WEIGHT=$(jq -r '.weight' data.json 2>/dev/null)
+TYPE=$(jq -r '.types[0].type.name' data.json 2>/dev/null)
+
+# Check if extraction was successful
+if [ -z "$NAME" ] || [ -z "$HEIGHT" ] || [ -z "$WEIGHT" ] || [ -z "$TYPE" ]; then
+    echo "Error: Failed to extract data from JSON." >&2
+    exit 1
+fi
+
+# Convert units:
+# Height: decimeters to meters (divide by 10)
+# Weight: hectograms to kg (divide by 10)
+HEIGHT_M=$(echo "scale=1; $HEIGHT / 10" | bc 2>/dev/null || echo "$HEIGHT")
+WEIGHT_KG=$(echo "scale=1; $WEIGHT / 10" | bc 2>/dev/null || echo "$WEIGHT")
+
+# Alternative: Use awk for calculation if bc is not available
+# But since we're only allowed to use jq, awk, sed, let's use awk:
+HEIGHT_M=$(echo "$HEIGHT" | awk '{printf "%.1f", $1/10}')
+WEIGHT_KG=$(echo "$WEIGHT" | awk '{printf "%.1f", $1/10}')
+
+# Capitalize first letter of type (Electric instead of electric)
+# Using sed for capitalization
+CAPITALIZED_TYPE=$(echo "$TYPE" | sed 's/^./\U&/')
+
+# Format the output using awk for precise formatting
+echo "$NAME is of type $CAPITALIZED_TYPE, weighs ${WEIGHT_KG}kg, and is ${HEIGHT_M}m tall." | \
+    awk '{
+        # Ensure no trailing .0 in the numbers
+        gsub(/\.0kg/, "kg", $0)
+        gsub(/\.0m/, "m", $0)
+        print $0
+    }'

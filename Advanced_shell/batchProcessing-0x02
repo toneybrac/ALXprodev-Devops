@@ -1,0 +1,238 @@
+#!/bin/bash
+
+# Script: batchProcessing-0x02
+# Description: Batch retrieval of Pokémon data with robust error handling and retry logic
+# Fetches data for multiple Pokémon and saves to individual JSON files
+
+# Configuration
+POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+DATA_DIR="pokemon_data"
+BASE_URL="https://pokeapi.co/api/v2/pokemon"
+DELAY_SECONDS=2
+MAX_RETRIES=3
+RETRY_DELAY=3  # Initial delay before retry (increases with each retry)
+LOG_FILE="batch_processing.log"
+
+# Create output directory
+mkdir -p "$DATA_DIR"
+
+# Initialize log file
+echo "=== Batch Pokémon Data Retrieval Log ===" > "$LOG_FILE"
+echo "Start time: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE"
+echo "Pokémon list: ${POKEMON_LIST[*]}" >> "$LOG_FILE"
+echo "" >> "$LOG_FILE"
+
+# Function to log messages
+log_message() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local message="$1"
+    echo "[$timestamp] $message" >> "$LOG_FILE"
+    echo "$message"
+}
+
+# Function to handle different types of errors
+handle_error() {
+    local pokemon="$1"
+    local error_type="$2"
+    local http_code="$3"
+    local attempt="$4"
+    
+    case "$error_type" in
+        "network")
+            log_message "  ❌ Network error fetching $pokemon (Attempt $attempt)"
+            ;;
+        "timeout")
+            log_message "  ⏰ Request timeout for $pokemon (Attempt $attempt)"
+            ;;
+        "http_404")
+            log_message "  ❌ Pokémon '$pokemon' not found (HTTP 404)"
+            ;;
+        "http_429")
+            log_message "  ⚠️ Rate limited for $pokemon (HTTP 429)"
+            ;;
+        "http_5xx")
+            log_message "  🔴 Server error for $pokemon (HTTP $http_code)"
+            ;;
+        "invalid_json")
+            log_message "  📄 Invalid JSON received for $pokemon"
+            ;;
+        "max_retries")
+            log_message "  💀 Failed to fetch $pokemon after $MAX_RETRIES attempts"
+            ;;
+        *)
+            log_message "  ❓ Unknown error for $pokemon: $error_type"
+            ;;
+    esac
+}
+
+# Function to wait with exponential backoff
+wait_with_backoff() {
+    local attempt=$1
+    local delay=$((RETRY_DELAY * (2 ** (attempt - 1))))
+    
+    # Cap maximum delay at 30 seconds
+    if [ $delay -gt 30 ]; then
+        delay=30
+    fi
+    
+    log_message "  ⏳ Waiting ${delay}s before retry..."
+    sleep $delay
+}
+
+# Function to fetch Pokémon data with retry logic
+fetch_pokemon_with_retry() {
+    local pokemon="$1"
+    local output_file="$DATA_DIR/${pokemon}.json"
+    local attempt=1
+    local success=0
+    
+    while [ $attempt -le $MAX_RETRIES ] && [ $success -eq 0 ]; do
+        log_message "Attempt $attempt/$MAX_RETRIES for $pokemon..."
+        
+        # Make API request with detailed error handling
+        HTTP_CODE=$(curl -sSL -o "$output_file" \
+            -w "%{http_code}" \
+            --max-time 30 \
+            --connect-timeout 10 \
+            --retry 0 \
+            "${BASE_URL}/${pokemon}" 2>/dev/null)
+        
+        local curl_exit_code=$?
+        
+        # Check for different failure scenarios
+        if [ $curl_exit_code -eq 0 ]; then
+            # Curl succeeded, check HTTP status
+            case "$HTTP_CODE" in
+                200)
+                    # Validate JSON structure
+                    if jq -e '.name' "$output_file" >/dev/null 2>&1; then
+                        log_message "  ✅ Successfully fetched $pokemon"
+                        success=1
+                    else
+                        handle_error "$pokemon" "invalid_json" "" "$attempt"
+                        rm -f "$output_file"
+                    fi
+                    ;;
+                404)
+                    handle_error "$pokemon" "http_404" "404" "$attempt"
+                    rm -f "$output_file"
+                    # No point retrying 404 errors
+                    break
+                    ;;
+                429)
+                    handle_error "$pokemon" "http_429" "429" "$attempt"
+                    rm -f "$output_file"
+                    wait_with_backoff $attempt
+                    ;;
+                5*)
+                    handle_error "$pokemon" "http_5xx" "$HTTP_CODE" "$attempt"
+                    rm -f "$output_file"
+                    wait_with_backoff $attempt
+                    ;;
+                *)
+                    log_message "  ⚠️ Unexpected HTTP code $HTTP_CODE for $pokemon"
+                    rm -f "$output_file"
+                    wait_with_backoff $attempt
+                    ;;
+            esac
+        else
+            # Curl failed
+            case $curl_exit_code in
+                7)   # Failed to connect
+                    handle_error "$pokemon" "network" "" "$attempt"
+                    ;;
+                28)  # Timeout
+                    handle_error "$pokemon" "timeout" "" "$attempt"
+                    ;;
+                *)
+                    log_message "  ❌ Curl error $curl_exit_code for $pokemon"
+                    ;;
+            esac
+            
+            wait_with_backoff $attempt
+        fi
+        
+        attempt=$((attempt + 1))
+    done
+    
+    if [ $success -eq 1 ]; then
+        # Final validation
+        if [ -s "$output_file" ] && jq -e '.name' "$output_file" >/dev/null 2>&1; then
+            echo "Saved data to $output_file ✅"
+            return 0
+        else
+            log_message "  ❌ Final validation failed for $pokemon"
+            rm -f "$output_file"
+            return 1
+        fi
+    else
+        handle_error "$pokemon" "max_retries" "" "$MAX_RETRIES"
+        return 1
+    fi
+}
+
+# Main execution
+log_message "Starting batch Pokémon data retrieval..."
+log_message "========================================"
+
+SUCCESS_COUNT=0
+FAIL_COUNT=0
+SKIP_COUNT=0
+
+for pokemon in "${POKEMON_LIST[@]}"; do
+    log_message ""
+    log_message "Processing: $pokemon"
+    
+    # Skip if file already exists and is valid
+    if [ -f "$DATA_DIR/${pokemon}.json" ]; then
+        if jq -e '.name' "$DATA_DIR/${pokemon}.json" >/dev/null 2>&1; then
+            log_message "  ℹ️ File already exists and is valid, skipping..."
+            SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+            continue
+        else
+            log_message "  ⚠️ Existing file is invalid, removing..."
+            rm -f "$DATA_DIR/${pokemon}.json"
+        fi
+    fi
+    
+    # Fetch data with retry logic
+    fetch_pokemon_with_retry "$pokemon"
+    
+    if [ $? -eq 0 ]; then
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+    
+    # Add delay between requests (except after the last one)
+    if [ "$pokemon" != "${POKEMON_LIST[-1]}" ]; then
+        log_message "  Waiting ${DELAY_SECONDS}s before next Pokémon..."
+        sleep "$DELAY_SECONDS"
+    fi
+done
+
+# Summary
+log_message ""
+log_message "========================================"
+log_message "Batch retrieval completed!"
+log_message "✅ Successfully fetched: $SUCCESS_COUNT Pokémon"
+log_message "❌ Failed to fetch: $FAIL_COUNT Pokémon"
+log_message "⏭️ Skipped (already existed): $SKIP_COUNT Pokémon"
+log_message ""
+log_message "Files saved in: $DATA_DIR/"
+log_message "Detailed log: $LOG_FILE"
+
+# Display file statistics
+echo ""
+echo "=== Final Summary ==="
+echo "Successful: $SUCCESS_COUNT"
+echo "Failed: $FAIL_COUNT"
+echo "Skipped: $SKIP_COUNT"
+echo ""
+echo "Created files:"
+ls -la "$DATA_DIR/" 2>/dev/null | grep "\.json" || echo "  No JSON files created."
+
+# Show last few log entries
+echo ""
+echo "Recent log entries:"
+tail -10 "$LOG_FILE"
